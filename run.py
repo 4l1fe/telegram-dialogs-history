@@ -1,90 +1,119 @@
-import os
-import lmdb
+#!venv/bin/python
 import logging
+import db
+from io import BytesIO
 from pyrogram import Client
-from pyrogram.api import functions, types
+from pyrogram.api import functions, types, Object
+from db import PT_USER, PT_CHAT, PT_CHANNEL
 
 
 logger = logging.getLogger('historian')
 API_ID = os.environ['API_ID']
 API_HASH = os.environ['API_HASH']
-DB_ENV = 'data'
-DIALOGS_DB = b'dialogs'
-MESSAGES_DB = b'messages'
-MB = 1024 * 1024
 
 
-def save_dialogs(dialogs, env):
-
-    def _make_key(peer):
-        key = 'dialog:{type}:{id}'
-        if isinstance(peer, types.PeerUser):
-            type_ = 'user'
-            id_ = peer.user_id
-        elif isinstance(peer, types.PeerChat):
-            type_ = 'chat'
-            id_ = peer.chat_id
-        elif isinstance(peer, types.PeerChannel):
-            type_ = 'channel'
-            id_ = peer.channel_id
-        else:
-            TypeError(f'undefined kind of dialog {peer}')
-
-        return key.format(type=type_, id=id_).encode()
-
-    putted = 0
-    db = env.open_db(DIALOGS_DB, dupsort=False)
-    with env.begin(db=db, write=True) as txn:
-        for dialog in dialogs:
-            key = _make_key(dialog.peer)
-            value = dialog.write()
-            is_putted = txn.put(key, value, overwrite=False)
-            if is_putted:
-                putted += 1
-            logger.debug(dialog)
-
-    return putted
+#todo file saving
 
 
-def show_dialogs():pass
+def show_dialogs():
+    dialogs = db.get_dialogs()
+    for d in dialogs:
+        print(d['type'], d['id'], d['name'])
 
 
-def save_history(messages, env):
-    import sys
-    db = env.open_db(MESSAGES_DB, dupsort=True)
-    size_count = 0
-    with env.begin(db=db, write=True) as txn:
-        for i, message in enumerate(messages):
-            key = b'message'
-            value = message.write()
-            size_count += len(value)
-            size = sys.getsizeof(value)
-            logger.info(f'{i}, {size_count}, {size}')
-            if size > 200:
-                logger.warning(f'{size}')
-                continue
+def show_messages(dialog_ids=None):
+    messages = db.get_messages(dialog_ids=dialog_ids)
+    for m in messages:
+        b = BytesIO(m['bin_data'])
+        message = Object.read(b)
+        if isinstance(message, types.message.Message):
+            print(message.message)
+        # else:
+        #     print(message)
 
-            txn.put(key, value, append=True)
+
+def get_dialog_type_id(dialog):
+    if isinstance(dialog.peer, types.PeerUser):
+        type_ = PT_USER
+        id_ = dialog.peer.user_id
+    elif isinstance(dialog.peer, types.PeerChat):
+        type_ = PT_CHAT
+        id_ = dialog.peer.chat_id
+    elif isinstance(dialog.peer, types.PeerChannel):
+        type_ = PT_CHANNEL
+        id_ = dialog.peer.channel_id
+    else:
+        TypeError(f'undefined kind of dialog {dialog}')
+
+    return type_, id_
 
 
 def main():
-    env = lmdb.open(DB_ENV, max_dbs=100, map_size=100*MB)
     client = Client('session', api_key=(API_ID, API_HASH))
     client.start()
 
-    dslice = client.send(functions.messages.GetDialogs(0, 0, types.InputPeerEmpty(), 100, exclude_pinned=False))
-    saved = save_dialogs(dslice.dialogs, env)
-    logger.info(f'saved {saved} dialogs')
+    def _get_dialog_name(type_, id_, client):
+        try:
+            ip = client.resolve_peer(id_)
+        except Exception as e:
+            print(type_, id_, e)
 
-    type_, id_ = input('t i: ').split()
-    offset = 0
-    limit = 100
+        if type_ == db.PT_CHANNEL:
+            chats = client.send(functions.channels.GetChannels([ip, ]))
+            channel = chats.chats[0]
+            name = channel.title
+        elif type_ == db.PT_CHAT:
+            chats = client.send(functions.messages.GetChats([id_]))
+            chat = chats.chats[0]
+            name = chat.title
+        elif type_ == db.PT_USER:
+            fu = client.send(functions.users.GetFullUser(ip))
+            name = fu.user.first_name
+        else:
+            TypeError(f'undefined type {type_}')
+
+        return name
+
+    def _extract_dialogs_data(dialogs):
+        data = []
+        for d in dialogs:
+            type_, id_ = get_dialog_type_id(d)
+            name = _get_dialog_name(type_, id_, client)
+            data.append((type_, id_, name, d))
+        return data
+
+    # def _get_offset_date(dslice):
+    #     for m in reversed(dslice.messages):
+    #         if isinstance(m, types.MessageEmpty):
+    #             continue
+    #
+    #         return m.date
+    #
+    #     return 0
+
+    # offset_date, limit = 0, 20
+    # saved = 0
+    # while True:
+    dslice = client.send(functions.messages.GetDialogs(0, 0, types.InputPeerEmpty(), 100))
+        # if not dslice.dialogs:
+        #     break
+    dialogs = _extract_dialogs_data(dslice.dialogs)
+    db.save_dialogs(dialogs)
+        # saved += len(dslice.dialogs)
+        # offset_date = _get_offset_date(dslice)
+    # logger.info(f'saved {saved} messages')
+
+    show_dialogs()
+    id_ = input('id: ')
+    # id_ = 296309357
+    offset, limit = 0, 100
     saved = 0
+    peer = client.resolve_peer(int(id_))
     while True:
-        hist = client.send(functions.messages.GetHistory(types.InputPeerChat(int(id_)), 0, 0, offset, limit, 0, 0, 0, ))
+        hist = client.send(functions.messages.GetHistory(peer, 0, 0, offset, limit, 0, 0, 0, ))
         if not hist.messages:
             break
-        save_history(hist.messages, env)
+        db.save_history(hist.messages, id_)
         saved += len(hist.messages)
         offset += limit
     logger.info(f'saved {saved} messages')
