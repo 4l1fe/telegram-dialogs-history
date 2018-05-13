@@ -1,10 +1,42 @@
 import sqlite3
+from peewee import *
+from pyrogram.api import Object
+from io import BytesIO
 
 
 DB = 'data'
-PT_USER = 'user'
-PT_CHAT = 'chat'
-PT_CHANNEL = 'channel'
+db = SqliteDatabase(DB)
+
+
+class Dialog(Model):
+
+    id = AutoField(primary_key=True)
+    dialog_id = IntegerField()
+    type = TextField()
+    name = TextField()
+    bin_data = BlobField()
+
+    class Meta:
+        database = db
+        tablename = 'dialogs'
+        constraints = [SQL('UNIQUE (dialog_id, type)')]
+
+
+class Message(Model):
+
+    id = IntegerField()
+    dialog = ForeignKeyField(Dialog, backref='messages')
+    bin_data = BlobField()
+
+    class Meta:
+        database = db
+        tablename = 'messages'
+        primary_key = CompositeKey('id', 'dialog')
+
+    @property
+    def message(self):
+        msg = Object.read(BytesIO(self.bin_data))
+        return msg
 
 
 def connect(func):
@@ -21,44 +53,6 @@ def connect(func):
 
 
 @connect
-def create_tables(cursor):
-    cursor.executescript("""CREATE TABLE IF NOT EXISTS dialogs(
-                                    id INT8,
-                                    type TEXT,
-                                    name TEXT NOT NULL,
-                                    bin_data BLOB,
-                                    PRIMARY KEY (id, type)
-                              ) WITHOUT ROWID;
-                              CREATE TABLE IF NOT EXISTS messages(
-                                    id INT8,
-                                    dialog_id INT8,
-                                    bin_data BLOB NOT NULL,
-                                    PRIMARY KEY (id, dialog_id)
-                                    FOREIGN KEY (dialog_id) REFERENCES dialogs(id)
-                              ) WITHOUT ROWID;
-                              """)
-
-
-@connect
-def save_dialogs(dialogs, cursor):
-
-    def _get_query_values(dialogs):
-        for type_, id_, name, d in dialogs:
-            bin_data = d.write()
-            yield type_, id_, name, sqlite3.Binary(bin_data)
-
-    cursor.executemany("""INSERT INTO dialogs(type, id, name, bin_data)
-                          VALUES (?,?,?,?);""", _get_query_values(dialogs))
-
-
-@connect
-def get_dialogs(cursor):
-    cursor.execute("""SELECT * FROM dialogs""")
-    dialogs = cursor.fetchall()
-    return dialogs
-
-
-@connect
 def get_messages(cursor, dialog_ids=None):
     query = "SELECT * FROM messages"
     if dialog_ids:
@@ -70,17 +64,7 @@ def get_messages(cursor, dialog_ids=None):
     return messages
 
 
-@connect
-def save_history(messages, dialog_id, cursor):
-
-    def _get_query_values(messages):
-        for message in messages:
-            yield message.id, dialog_id, sqlite3.Binary(message.write())
-
-    cursor.executemany("""INSERT INTO messages(id, dialog_id, bin_data) 
-                      VALUES (?,?,?)""", _get_query_values(messages))
-
-
 if __name__ == '__main__':
-    create_tables()
+    db.connect()
+    db.create_tables([Dialog, Message])
     print('created')
